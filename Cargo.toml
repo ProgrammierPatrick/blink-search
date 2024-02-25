@@ -3,7 +3,7 @@ name = "blink-search"
 description = "A fuzzy finder to quickly locate files or folders from a list of configured locations."
 authors = [ "Patrick Jaberg <patrick.jaberg@gmx.de>" ]
 repository = "https://github.com/ProgrammierPatrick/blink-search"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "GPL-3.0"
 

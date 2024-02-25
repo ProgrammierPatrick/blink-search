@@ -15,6 +15,9 @@ fn open_folder(path: &str) -> Result<()> {
     let path = Regex::new(r"/+").unwrap().replace_all(&path, "/");
 
     let (exe, path) = if cfg!(target_os = "windows") {
+        let mut path = path.to_string();
+        if path.starts_with('/') { path = format!("/{}", path); }
+        path = path.replace("/", "\\");
         ("explorer", path.replace("/", "\\"))
     } else {
         ("xdg-open", path.to_string())
