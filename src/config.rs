@@ -9,14 +9,14 @@ pub struct Config {
     pub locations: BTreeMap<String, Location>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Location {
     pub path: String,
     pub mode: LocationMode,
     pub cache_file: Option<String>
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum LocationMode {
     Files,

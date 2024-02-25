@@ -1,18 +1,27 @@
 use anyhow::Result;
 use regex::Regex;
 use config::{Config, Location, LocationMode};
-use std::{fs::File, io::Write, path::Path, process::{exit, Command, Stdio}};
+use std::{fs::{File, OpenOptions}, io::{BufRead, Write}, path::Path, process::{exit, Command, Stdio}, env};
 use clap::Parser;
+use log::{info, debug};
+use simplelog::{CombinedLogger, LevelFilter, TermLogger, TerminalMode, WriteLogger, ColorChoice};
 mod config;
 
 fn open_folder(path: &str) -> Result<()> {
+    let path = path.trim();
+    debug!("open_folder({})", path);
+
+    let path = path.replace("\\", "/");
+    let path = Regex::new(r"/+").unwrap().replace_all(&path, "/");
+
     let (exe, path) = if cfg!(target_os = "windows") {
         ("explorer", path.replace("/", "\\"))
     } else {
-        ("xdg-open", path.to_owned())
+        ("xdg-open", path.to_string())
     };
 
-    println!("Executing {} {}", exe, path);
+    info!("Executing {} {}", exe, path);
+
     Command::new(exe)
         .arg(path)
         .spawn()?;
@@ -30,16 +39,16 @@ fn run(exe: &str) -> Command {
     Command::new(format!("{}{}", exe, ext))
 }
 
-enum OpenAction { Open(String), Menu }
+enum OpenAction { Open, Menu }
 fn fzf_open(location_name: &str, location: &Location) -> Result<OpenAction> {
     let fd_list: Stdio = match &location.cache_file {
         Some(cache_file) => {
             let path = Path::new(&location.path).join(cache_file);
-            println!("Reading cache file: {}", path.to_string_lossy());
+            info!("Reading cache file: {}", path.to_string_lossy());
             let file = match File::open(&path) {
                 Ok(f) => f,
                 Err(_) => {
-                    println!("Cache file {} not found. Please check your configuration.", path.to_string_lossy());
+                    info!("Cache file {} not found. Please check your configuration.", path.to_string_lossy());
                     exit(-1);
                 }
             };
@@ -65,26 +74,42 @@ fn fzf_open(location_name: &str, location: &Location) -> Result<OpenAction> {
         }
     };
 
-    let out = run("fzf")
+    let mut out = run("fzf")
         .arg("--scheme=path")
         .arg(format!("--history={}", Config::base_dir().join(format!("history-{}.txt", location_to_id(location_name)?)).to_string_lossy()))
         .arg("--bind").arg("tab:execute(echo TAB)+abort")
+        .arg("--bind").arg(format!("ctrl-x:execute({} --open-path={{}} {})", env::current_exe()?.to_string_lossy(), location_name))
 
         .stdin(fd_list)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .spawn()?
-        .wait_with_output()?;
+        .spawn()?;
 
-    let ret = out.status.code().unwrap();
-    let str = String::from_utf8_lossy(&out.stdout);
+    let reader = std::io::BufReader::new(out.stdout.as_mut().unwrap());
+    let mut is_tab = false;
+    for line in reader.lines() {
+        match line {
+            Ok(ref s) if s == "TAB" => is_tab = true,
+            Ok(s) => {
+                debug!("FZF output: {}", s);
+                let s = match s.trim() {
+                    s if s.starts_with('"') && s.ends_with('"') => s[1..s.len()-1].replace("\\\\", "\\"),
+                    s => s.to_owned(),
+                };
+                debug!("Opening: {}", s);
+                open_folder(&Path::new(&location.path).join(s).to_string_lossy()).unwrap()
+            },
+            Err(e) => panic!("Error reading line: {}", e),
+        }
+    }
 
-    println!("Exit code: {}, output: '{}'", ret, str.as_ref());
+    let status = out.wait()?;
+    let ret = status.code().unwrap();
 
-    match (ret, str.as_ref().trim()) {
-        (130, "TAB") => return Ok(OpenAction::Menu),
-        (0, s) => Ok(OpenAction::Open(s.trim().to_string())),
-        _ => return Err(anyhow::anyhow!("fzf exited with code {}", ret)),
+    match (ret, is_tab) {
+        (130, true) => return Ok(OpenAction::Menu),
+        (0, false) => Ok(OpenAction::Open),
+        _ => return Err(anyhow::anyhow!("fzf exited with code {}, is_tab={}", ret, is_tab)),
     }
 }
 
@@ -136,6 +161,10 @@ struct Args {
     #[arg(short, long)]
     get_config_path: bool,
 
+    /// Directly open path using this query. Useful for scripting.
+    #[arg(short, long)]
+    open_path: Option<String>,
+
     /// Specify the location to search.
     /// 
     /// Accepts shortened if unique.
@@ -151,6 +180,13 @@ fn verify_cli() {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    let log_name = if args.open_path.is_some() { "blink-open.log" } else { "blink.log" };
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(Config::base_dir().join(log_name))?;
+    WriteLogger::init(LevelFilter::Debug, simplelog::Config::default(), log_file)?;
 
     if args.get_config_path {
         println!("{}", Config::path().to_string_lossy());
@@ -202,6 +238,7 @@ fn main() -> Result<()> {
     };
 
     if args.create_cache {
+        debug!("Creating cache for {}", location_name);
         let loc = config.locations.get(&location_name).unwrap();
         run("fd")
             .arg(".")
@@ -215,18 +252,24 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    match args.open_path {
+        Some(ref s) => {
+            debug!("execute --open-path={} with location {}", s, location_name);
+            let loc = config.locations.get(&location_name).unwrap();
+            open_folder(&Path::new(&loc.path).join(s).to_string_lossy()).unwrap();
+            return Ok(());
+        },
+        None => (),
+    }
+
     loop {
         let loc = config.locations.get(&location_name).unwrap();
         match fzf_open(&location_name, loc)? {
-            OpenAction::Open(path) => {
-                open_folder(&Path::new(&loc.path).join(path).to_string_lossy())?;
-                return Ok(())
-            },
+            OpenAction::Open => return Ok(()),
             OpenAction::Menu => {
                 location_name = fzf_menu(None, &config)?;
-                println!("Selected location: {}", location_name);
+                info!("Selected location: {}", location_name);
             },
         }
     }
-    
 }
