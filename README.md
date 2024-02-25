@@ -22,10 +22,10 @@ Now, when you run `bl`, you can open any file from within `/home/user/Documents`
 To switch to another location, hit `[TAB]` and choose from the menu.
 You can also use `[TAB]` again to accept the selection.
 
-ALternatively, run `bl local-nas-smb` or `bl nas` for short to directly use the second location.
+Alternatively, run `bl local-nas-smb` or `bl nas` for short to directly use the second location.
 
 # Create Windows Installer MSI
-First, install [WiX Toolset 3](https://github.com/wixtoolset/wix3/releases) ([Wix 3 Documentation] (https://wixtoolset.org/docs/v3))
+First, install [WiX Toolset 3](https://github.com/wixtoolset/wix3/releases) ([Wix 3 Documentation](https://wixtoolset.org/docs/v3))
 
 ```ps
 cargo install cargo-wix
@@ -37,6 +37,7 @@ cargo build --release
 cargo wix --nocapture
 ```
 
-## Recreate WiX config:
+## Recreate WiX config
+Recreate WiX config based on `Cargo.toml`: (Will overwrite all Modifications!)
 1. delete folder `\wix`
-2. cargo wix init
+2. `cargo wix init`
