@@ -41,3 +41,6 @@ cargo wix --nocapture
 Recreate WiX config based on `Cargo.toml`: (Will overwrite all Modifications!)
 1. delete folder `\wix`
 2. `cargo wix init`
+
+# Similar Projects
+- ff by genotrance: https://github.com/genotrance/ff

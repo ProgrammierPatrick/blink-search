@@ -1,10 +1,12 @@
 use anyhow::Result;
 use regex::Regex;
 use config::{Config, Location, LocationMode};
-use std::{fs::{File, OpenOptions}, io::{BufRead, Write}, path::Path, process::{exit, Command, Stdio}, env};
-use clap::Parser;
+use memchr;
+use std::{env, ffi::OsString, fs::{File, OpenOptions}, io::{self, BufRead, BufReader, Write}, path::{Path, PathBuf}, process::{exit, ChildStdout, Command, Stdio}, str::FromStr};
+use clap::{Parser, ValueEnum};
 use log::{info, debug};
-use simplelog::{CombinedLogger, LevelFilter, TermLogger, TerminalMode, WriteLogger, ColorChoice};
+use simplelog::{LevelFilter, WriteLogger};
+use strum;
 mod config;
 
 fn open_folder(path: &str) -> Result<()> {
@@ -18,17 +20,14 @@ fn open_folder(path: &str) -> Result<()> {
         let mut path = path.to_string();
         if path.starts_with('/') { path = format!("/{}", path); }
         path = path.replace("/", "\\");
-        ("explorer", path.replace("/", "\\"))
+        ("explorer", OsString::from_str(&path)?)
     } else {
-        ("xdg-open", path.to_string())
+        ("xdg-open", OsString::from_str(&path)?)
     };
-
-    info!("Executing {} {}", exe, path);
-
     Command::new(exe)
         .arg(path)
+        .with(|b| debug!("Executing: {:?}", b))
         .spawn()?;
-
     Ok(())
 }
 
@@ -42,50 +41,75 @@ fn run(exe: &str) -> Command {
     Command::new(format!("{}{}", exe, ext))
 }
 
-enum OpenAction { Open, Menu }
-fn fzf_open(location_name: &str, location: &Location) -> Result<OpenAction> {
-    let fd_list: Stdio = match &location.cache_file {
-        Some(cache_file) => {
-            let path = Path::new(&location.path).join(cache_file);
-            info!("Reading cache file: {}", path.to_string_lossy());
-            let file = match File::open(&path) {
-                Ok(f) => f,
-                Err(_) => {
-                    info!("Cache file {} not found. Please check your configuration.", path.to_string_lossy());
-                    exit(-1);
-                }
-            };
-            file.into()
-        },
-        None => {
-            run("fd")
-                .arg(".")
-                .arg("--type").arg(match location.mode {
-                    LocationMode::Files => "f",
-                    LocationMode::Folders => "d",
-                })
+fn normalize(file_names: Stdio, sep: Separator) -> Result<ChildStdout> {
+    Ok(Command::new(env::current_exe()?)
+        .arg(format!("--normalize-paths={}", sep))
+        .stdin(file_names)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .with(|b| debug!("Executing: {:?}", b))
+        .spawn()?
+        .stdout.unwrap())
+}
 
-                .current_dir(&location.path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-
-                .spawn()?
-                .stdout
-                .unwrap()
-                .into()
+fn read_location_from_cache(path: PathBuf) -> Result<ChildStdout> {
+    info!("Reading cache file: \"{}\"", path.to_string_lossy());
+    let file = match File::open(&path) {
+        Ok(f) => f,
+        Err(_) => {
+            info!("Cache file {} not found. Please check your configuration.", path.to_string_lossy());
+            exit(-1);
         }
+    };
+    normalize(file.into(), Separator::Newline)
+}
+
+fn read_location_cmd(location: &Location, config: &Config) -> Command {
+    let mut cmd = run("fd");
+    cmd
+        .arg(".")
+        .arg("--print0")
+        .arg("--type").arg(match location.mode {
+            LocationMode::Files => "f",
+            LocationMode::Folders => "d",
+        })
+        .args(config.fd_flags.as_ref().unwrap_or(&Vec::new()))
+        .current_dir(&location.path)
+        .with(|b| debug!("Executing: {:?}", b));
+    cmd
+}
+
+fn read_location_with_fd(location: &Location, config: &Config) -> Result<ChildStdout> {
+    let fd_list = read_location_cmd(location, config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?
+        .stdout.unwrap();
+    normalize(fd_list.into(), Separator::Null)
+}
+
+enum OpenAction { Open, Menu }
+fn fzf_open(location_name: &str, location: &Location, config: &Config) -> Result<OpenAction> {
+    let this_exe = env::current_exe()?;
+
+    let fzf_input_list = match &location.cache_file {
+        Some(cache_file) => read_location_from_cache(Path::new(&location.path).join(cache_file))?,
+        None => read_location_with_fd(location, config)?,
     };
 
     let mut out = run("fzf")
         .arg("--scheme=path")
         .arg(format!("--history={}", Config::base_dir().join(format!("history-{}.txt", location_to_id(location_name)?)).to_string_lossy()))
-        .arg("--bind").arg("tab:execute(echo TAB)+abort")
-        .arg("--bind").arg(format!("ctrl-x:execute({} --open-path={{}} {})", env::current_exe()?.to_string_lossy(), location_name))
+        .arg("--bind=tab:execute(echo TAB)+abort")
+        .arg(format!("--bind=ctrl-x:execute(\"{}\" --open-path={{}} {})", this_exe.display(), location_name))
+        .arg("--bind=alt-c:execute(echo EDIT_CONFIG)+abort")
+        .args(config.fzf_flags.as_ref().unwrap_or(&Vec::new()))
 
-        .stdin(fd_list)
+        .stdin(fzf_input_list)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
+        .with(|b| debug!("Executing: {:?}", b))
         .spawn()?;
 
     let reader = std::io::BufReader::new(out.stdout.as_mut().unwrap());
@@ -94,12 +118,12 @@ fn fzf_open(location_name: &str, location: &Location) -> Result<OpenAction> {
         match line {
             Ok(ref s) if s == "TAB" => is_tab = true,
             Ok(s) => {
-                debug!("FZF output: {}", s);
+                debug!("FZF output: \"{}\"", s);
                 let s = match s.trim() {
                     s if s.starts_with('"') && s.ends_with('"') => s[1..s.len()-1].replace("\\\\", "\\"),
                     s => s.to_owned(),
                 };
-                debug!("Opening: {}", s);
+                debug!("Opening: \"{}\"", s);
                 open_folder(&Path::new(&location.path).join(s).to_string_lossy()).unwrap()
             },
             Err(e) => panic!("Error reading line: {}", e),
@@ -117,16 +141,15 @@ fn fzf_open(location_name: &str, location: &Location) -> Result<OpenAction> {
 }
 
 fn fzf_menu(query: Option<&str>, config: &Config) -> Result<String> {
-    let mut fzf = run("fzf");
-    fzf.arg(format!("--history={}", Config::base_dir().join("history-menu.txt").to_string_lossy()));
-    fzf.arg("--bind").arg("tab:accept");
-    if let Some(q) = query {
-        fzf.arg(format!("--query={}", q));
-    }
-
-    let fzf = fzf.stdin(Stdio::piped())
+    let fzf = run("fzf")
+        .arg(format!("--history={}", Config::base_dir().join("history-menu.txt").to_string_lossy()))
+        .arg("--bind").arg("tab:accept")
+        .with(|b| if let Some(q) = query { b.arg(format!("--query={}", q)); })
+        .args(config.fzf_flags.as_ref().unwrap_or(&Vec::new()))
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
+        .with(|b| debug!("Executing: {:?}", b))                
         .spawn()?;
 
     for s in config.locations.iter().map(|(name, loc)| format!("{} ({})", name, loc.path)) {
@@ -165,14 +188,26 @@ struct Args {
     get_config_path: bool,
 
     /// Directly open path using this query. Useful for scripting.
-    #[arg(short, long)]
+    #[arg(long)]
     open_path: Option<String>,
+
+    /// Normalizes all paths from stdin separated by NULL bytes to a native format separeted by newline. Useful for scripting.
+    #[arg(long)]
+    normalize_paths: Option<Separator>,
 
     /// Specify the location to search.
     /// 
     /// Accepts shortened if unique.
     /// If not specified, the first location in the config will be used.
     location: Option<String>,
+}
+
+#[derive(Parser, Clone, ValueEnum, strum::Display)]
+enum Separator {
+    #[strum(serialize = "null")]
+    Null,
+    #[strum(serialize = "newline")]
+    Newline,
 }
 
 #[test]
@@ -182,21 +217,39 @@ fn verify_cli() {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let config = Config::new()?;
 
-    let log_name = if args.open_path.is_some() { "blink-open.log" } else { "blink.log" };
+    let log_name = "blink.log";
     let log_file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(Config::base_dir().join(log_name))?;
     WriteLogger::init(LevelFilter::Debug, simplelog::Config::default(), log_file)?;
 
+    debug!("Command line: {:?}", std::env::args().collect::<Vec<String>>());
+
+    let args = Args::parse();
+
+    if let Some(separator) = args.normalize_paths {
+        let separator = match separator {
+            Separator::Null => b'\0',
+            Separator::Newline => b'\n',
+        };
+        for line in BufReader::new(io::stdin()).split(separator) {
+            let s: String = String::from_utf8_lossy(&line?)
+                .trim()
+                .trim_start_matches("./")
+                .trim_start_matches(".\\")
+                .chars().map(|c| if c.is_control() { char::REPLACEMENT_CHARACTER } else { c }).collect();
+            println!("{}", Path::new(&s).to_string_lossy());
+        }
+        return Ok(());
+    }
+
     if args.get_config_path {
         println!("{}", Config::path().to_string_lossy());
         return Ok(());
     }
-
-    let config = Config::new()?;
 
     if args.list_locations {
         for (name, loc) in config.locations.iter() {
@@ -243,15 +296,7 @@ fn main() -> Result<()> {
     if args.create_cache {
         debug!("Creating cache for {}", location_name);
         let loc = config.locations.get(&location_name).unwrap();
-        run("fd")
-            .arg(".")
-            .arg("--type").arg(match loc.mode {
-                LocationMode::Files => "f",
-                LocationMode::Folders => "d",
-            })
-            .current_dir(&loc.path)
-            .spawn()?
-            .wait()?;
+        io::copy(&mut read_location_with_fd(loc, &config)?, &mut io::stdout())?;
         return Ok(());
     }
 
@@ -267,12 +312,75 @@ fn main() -> Result<()> {
 
     loop {
         let loc = config.locations.get(&location_name).unwrap();
-        match fzf_open(&location_name, loc)? {
+        match fzf_open(&location_name, loc, &config)? {
             OpenAction::Open => return Ok(()),
             OpenAction::Menu => {
                 location_name = fzf_menu(None, &config)?;
                 info!("Selected location: {}", location_name);
             },
+        }
+    }
+}
+
+// Extend Command Builder with with() function
+trait WithFunction {
+    fn with<F>(&mut self, f: F) -> &mut Self
+    where
+        F: FnOnce(&mut Self);
+}
+impl WithFunction for Command {
+    fn with<F>(&mut self, f: F) -> &mut Self
+    where
+        F: FnOnce(&mut Self)
+    {
+        f(self);
+        self
+    }
+}
+
+// Extend BufRead with split2() function
+trait Split2Ext: BufRead + Sized {
+    fn split2(self, delim1: u8, delim2: u8) -> Split2<Self>;
+}
+impl<R: BufRead> Split2Ext for R {
+    fn split2(self, delim1: u8, delim2: u8) -> Split2<Self> {
+        Split2 { reader: self, delim: (delim1, delim2) }
+    }
+}
+struct Split2<R: BufRead> {
+    reader: R,
+    delim: (u8, u8),
+}
+impl<R: BufRead> Iterator for Split2<R> {
+    type Item = Result<Vec<u8>>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut buf = Vec::new();
+        loop {
+            let available = match self.reader.fill_buf() {
+                Ok(s) => s,
+                Err(e) => return Some(Err(e.into())),
+            };
+            let (done, used) = match memchr::memchr2(self.delim.0, self.delim.1, available) {
+                Some(i) => {
+                    buf.extend_from_slice(&available[..=i]);
+                    (true, i+1)
+                },
+                None => {
+                    buf.extend_from_slice(available);
+                    (false, available.len())
+                },
+            };
+            self.reader.consume(used);
+            if done || used == 0 {
+                break;
+            }
+        }
+        while buf.last() == Some(&self.delim.0) || buf.last() == Some(&self.delim.1) {
+            buf.pop();
+        }
+        match buf.len() {
+            0 => None,
+            _ => Some(Ok(buf)),
         }
     }
 }

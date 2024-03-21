@@ -7,6 +7,8 @@ use directories::BaseDirs;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub locations: BTreeMap<String, Location>,
+    pub fd_flags: Option<Vec<String>>,
+    pub fzf_flags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -42,7 +44,9 @@ impl Default for Location {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            locations: BTreeMap::new()
+            locations: BTreeMap::new(),
+            fd_flags: None,
+            fzf_flags: None
         }
     }
 }
