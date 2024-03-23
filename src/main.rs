@@ -16,16 +16,20 @@ fn open_folder(path: &str) -> Result<()> {
     let path = path.replace("\\", "/");
     let path = Regex::new(r"/+").unwrap().replace_all(&path, "/");
 
-    let (exe, path) = if cfg!(target_os = "windows") {
+    let mut cmd = if cfg!(target_os = "windows") {
         let mut path = path.to_string();
         if path.starts_with('/') { path = format!("/{}", path); }
         path = path.replace("/", "\\");
-        ("explorer", OsString::from_str(&path)?)
+        path = path.trim_end_matches('\\').to_owned();
+        let mut cmd = Command::new("explorer");
+        cmd.arg(OsString::from_str(&path)?);
+        cmd
     } else {
-        ("xdg-open", OsString::from_str(&path)?)
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(OsString::from_str(&path)?);
+        cmd
     };
-    Command::new(exe)
-        .arg(path)
+    cmd
         .with(|b| debug!("Executing: {:?}", b))
         .spawn()?;
     Ok(())
@@ -89,7 +93,10 @@ fn read_location_with_fd(location: &Location, config: &Config) -> Result<ChildSt
     normalize(fd_list.into(), Separator::Null)
 }
 
-enum OpenAction { Open, Menu }
+enum OpenAction {
+    Open(PathBuf),
+    Menu
+}
 fn fzf_open(location_name: &str, location: &Location, config: &Config) -> Result<OpenAction> {
     let this_exe = env::current_exe()?;
 
@@ -113,18 +120,20 @@ fn fzf_open(location_name: &str, location: &Location, config: &Config) -> Result
         .spawn()?;
 
     let reader = std::io::BufReader::new(out.stdout.as_mut().unwrap());
-    let mut is_tab = false;
+    let mut action: Option<OpenAction> = None;
     for line in reader.lines() {
-        match line {
-            Ok(ref s) if s == "TAB" => is_tab = true,
+        debug!("Reading fzf output line: {:?}", line);
+        assert!(action.is_none());
+        action = match line {
+            Ok(ref s) if s == "TAB" => Some(OpenAction::Menu),
+            Ok(ref s) if s == "EDIT_CONFIG" => Some(OpenAction::Open(Config::path())),
             Ok(s) => {
                 debug!("FZF output: \"{}\"", s);
                 let s = match s.trim() {
                     s if s.starts_with('"') && s.ends_with('"') => s[1..s.len()-1].replace("\\\\", "\\"),
                     s => s.to_owned(),
                 };
-                debug!("Opening: \"{}\"", s);
-                open_folder(&Path::new(&location.path).join(s).to_string_lossy()).unwrap()
+                Some(OpenAction::Open(Path::new(&location.path).join(s)))
             },
             Err(e) => panic!("Error reading line: {}", e),
         }
@@ -132,11 +141,10 @@ fn fzf_open(location_name: &str, location: &Location, config: &Config) -> Result
 
     let status = out.wait()?;
     let ret = status.code().unwrap();
-
-    match (ret, is_tab) {
-        (130, true) => return Ok(OpenAction::Menu),
-        (0, false) => Ok(OpenAction::Open),
-        _ => return Err(anyhow::anyhow!("fzf exited with code {}, is_tab={}", ret, is_tab)),
+    match (ret, action) {
+        (130, Some(OpenAction::Menu)) => Ok(OpenAction::Menu),
+        (_, Some(OpenAction::Open(path))) => Ok(OpenAction::Open(path)),
+        _ => return Err(anyhow::anyhow!("fzf exited with code {}", ret)),
     }
 }
 
@@ -313,8 +321,12 @@ fn main() -> Result<()> {
     loop {
         let loc = config.locations.get(&location_name).unwrap();
         match fzf_open(&location_name, loc, &config)? {
-            OpenAction::Open => return Ok(()),
-            OpenAction::Menu => {
+            OpenAction::Open(path) => {
+                let s = path.to_string_lossy();
+                debug!("Opening: \"{}\"", s);
+                open_folder(&s).unwrap();
+                return Ok(());
+            }, OpenAction::Menu => {
                 location_name = fzf_menu(None, &config)?;
                 info!("Selected location: {}", location_name);
             },

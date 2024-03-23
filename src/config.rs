@@ -1,4 +1,5 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::path::PathBuf;
+use linked_hash_map::LinkedHashMap;
 use serde_yaml;
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
@@ -6,7 +7,7 @@ use directories::BaseDirs;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
-    pub locations: BTreeMap<String, Location>,
+    pub locations: LinkedHashMap<String, Location>,
     pub fd_flags: Option<Vec<String>>,
     pub fzf_flags: Option<Vec<String>>,
 }
@@ -44,7 +45,7 @@ impl Default for Location {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            locations: BTreeMap::new(),
+            locations: LinkedHashMap::new(),
             fd_flags: None,
             fzf_flags: None
         }

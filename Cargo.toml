@@ -3,7 +3,7 @@ name = "blink-search"
 description = "A fuzzy finder to quickly locate files or folders from a list of configured locations."
 authors = [ "Patrick Jaberg <patrick.jaberg@gmx.de>" ]
 repository = "https://github.com/ProgrammierPatrick/blink-search"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "GPL-3.0"
 
@@ -15,15 +15,16 @@ path = "src/main.rs"
 anyhow = "1.0.79"
 clap = { version = "4.5.0", features = ["derive"] }
 directories = "5.0.1"
+linked-hash-map = { version = "0.5", features = ["serde_impl"] }
 log = "0.4.20"
 memchr = "2.7.1"
 regex = "1.10.3"
-serde = { version = "1.0.196", features = ["derive"] }
-serde_yaml = "0.9.31"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = { version = "0.9" }
 simplelog = "0.12.1"
 strum = { version = "0.26.1", features = ["derive"] }
 
 [build-dependencies]
 anyhow = "1.0.79"
-reqwest = { version = "0.11", features = ["blocking"] }
+reqwest = { version = "0.12", features = ["blocking"] }
 zip = "0.6.6"
